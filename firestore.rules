@@ -1,0 +1,232 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function myUser() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return signedIn() && myUser().role == 'admin';
+    }
+
+    function isStudent() {
+      return signedIn() && myUser().role == 'student';
+    }
+
+    function isReceptionistFor(departmentId) {
+      return signedIn()
+        && myUser().role == 'receptionist'
+        && myUser().departmentId == departmentId;
+    }
+
+    function validQueueTransition() {
+      let from = resource.data.status;
+      let to = request.resource.data.status;
+      return (from == 'waiting' && (to == 'approaching' || to == 'cancelled'))
+        || (from == 'approaching' && (to == 'called' || to == 'cancelled'))
+        || (from == 'called' && (to == 'serving' || to == 'onHold'))
+        || (from == 'onHold' && (to == 'called' || to == 'expired' || to == 'cancelled'))
+        || (from == 'serving' && to == 'completed');
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+      // A signed-in account may create its own student profile only; staff/admin roles stay admin-managed.
+      allow create: if (signedIn() && request.auth.uid != userId && isAdmin())
+        || (signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.keys().hasAll(['name', 'email', 'role', 'createdAt'])
+          && request.resource.data.keys().hasOnly(['name', 'email', 'role', 'createdAt'])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() >= 2
+          && request.resource.data.email == request.auth.token.email
+          && request.resource.data.role == 'student'
+          && request.resource.data.createdAt == request.time);
+      allow delete: if isAdmin();
+      allow update: if isAdmin()
+        || (signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fcmInstallationId', 'fcmUpdatedAt'
+          ]));
+    }
+
+    match /departments/{departmentId} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+    }
+
+    match /services/{serviceId} {
+      allow read: if signedIn();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin()
+        || (isStudent()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'lastTokenNumber', 'lastIssuedEntryId'
+          ])
+          && request.resource.data.lastTokenNumber == resource.data.lastTokenNumber + 1
+          && request.resource.data.lastIssuedEntryId is string
+          && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.lastIssuedEntryId)).data.studentId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.lastIssuedEntryId)).data.serviceId == serviceId
+          && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.lastIssuedEntryId)).data.tokenNumber == request.resource.data.lastTokenNumber)
+        || (isReceptionistFor(resource.data.departmentId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'counterStatus', 'breakUntil', 'breakStartedAt'
+          ])
+          && ((resource.data.counterStatus == 'open' && request.resource.data.counterStatus == 'break')
+            || (resource.data.counterStatus == 'break' && request.resource.data.counterStatus == 'open')));
+    }
+
+    match /queueEntries/{entryId} {
+      allow read: if signedIn()
+        && (resource.data.studentId == request.auth.uid
+          || isAdmin()
+          || isReceptionistFor(resource.data.departmentId));
+
+      allow create: if isStudent()
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.status == 'waiting'
+        && request.resource.data.keys().hasAll([
+          'studentId', 'serviceId', 'departmentId', 'tokenCode', 'tokenNumber',
+          'status', 'qrPayload', 'qrNonce', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'studentId', 'studentFirstName', 'serviceId', 'departmentId', 'tokenCode',
+          'tokenNumber', 'averageServiceTime', 'status', 'qrPayload', 'qrNonce', 'createdAt', 'updatedAt'
+        ])
+        && get(/databases/$(database)/documents/services/$(request.resource.data.serviceId)).data.counterStatus in ['open', 'break']
+        && request.resource.data.departmentId == get(/databases/$(database)/documents/services/$(request.resource.data.serviceId)).data.departmentId
+        && getAfter(/databases/$(database)/documents/services/$(request.resource.data.serviceId)).data.lastTokenNumber == request.resource.data.tokenNumber
+        && getAfter(/databases/$(database)/documents/services/$(request.resource.data.serviceId)).data.lastIssuedEntryId == entryId
+        && getAfter(/databases/$(database)/documents/activeTokens/$(request.auth.uid + '__' + request.resource.data.serviceId)).data.entryId == entryId;
+
+      allow update: if isAdmin()
+        || (isReceptionistFor(resource.data.departmentId)
+          && resource.data.status == 'called'
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.graceWarningSent == true
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'graceWarningSent'
+          ]))
+        || (isReceptionistFor(resource.data.departmentId)
+          && resource.data.status == request.resource.data.status
+          && get(/databases/$(database)/documents/services/$(resource.data.serviceId)).data.counterStatus == 'break'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'updatedAt', 'graceEndsAt', 'holdEndsAt'
+          ]))
+        || (signedIn()
+        && validQueueTransition()
+        && ((resource.data.studentId == request.auth.uid
+              && (request.resource.data.status == 'cancelled'
+                || (resource.data.status == 'onHold' && request.resource.data.status == 'called'))
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status', 'updatedAt', 'calledAt', 'graceEndsAt', 'holdEndsAt',
+                'graceWarningSent'
+              ]))
+          || (isReceptionistFor(resource.data.departmentId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status', 'updatedAt', 'calledAt', 'graceEndsAt', 'holdEndsAt',
+                'startedAt', 'completedAt', 'servedBy', 'graceWarningSent'
+              ]))
+          ));
+
+      allow delete: if isAdmin();
+    }
+
+    // Sanitized queue projection: students can calculate position without reading names or QR data.
+    match /queuePublic/{entryId} {
+      allow read: if signedIn();
+      allow create: if isStudent()
+        && request.resource.data.keys().hasAll([
+          'serviceId', 'departmentId', 'tokenCode', 'tokenNumber', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'serviceId', 'departmentId', 'tokenCode', 'tokenNumber', 'status', 'createdAt', 'updatedAt'
+        ])
+        && request.resource.data.status == 'waiting'
+        && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.studentId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.serviceId == request.resource.data.serviceId
+        && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.tokenNumber == request.resource.data.tokenNumber
+        && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.tokenCode == request.resource.data.tokenCode
+        && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.departmentId == request.resource.data.departmentId;
+      allow update: if isAdmin()
+        || (signedIn()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+          && getAfter(/databases/$(database)/documents/queueEntries/$(entryId)).data.status == request.resource.data.status
+          && ((get(/databases/$(database)/documents/queueEntries/$(entryId)).data.studentId == request.auth.uid
+                && (request.resource.data.status == 'cancelled'
+                  || (resource.data.status == 'onHold' && request.resource.data.status == 'called')))
+            || (isReceptionistFor(resource.data.departmentId)
+                && validQueueTransition())));
+      allow delete: if isAdmin();
+    }
+
+    match /activeTokens/{claimId} {
+      allow get: if signedIn()
+        && (resource == null
+          || resource.data.studentId == request.auth.uid
+          || isAdmin()
+          || isReceptionistFor(resource.data.departmentId));
+      allow list: if false;
+
+      allow create: if isStudent()
+        && request.resource.data.keys().hasAll(['studentId', 'serviceId', 'departmentId', 'entryId'])
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.keys().hasOnly(['studentId', 'serviceId', 'departmentId', 'entryId'])
+        && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.studentId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.serviceId == request.resource.data.serviceId;
+
+      allow update: if isStudent()
+        && resource.data.studentId == request.auth.uid
+        && request.resource.data.studentId == request.auth.uid
+        && request.resource.data.keys().hasOnly(['studentId', 'serviceId', 'departmentId', 'entryId'])
+        && get(/databases/$(database)/documents/queueEntries/$(resource.data.entryId)).data.status in [
+          'completed', 'cancelled', 'expired'
+        ]
+        && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.studentId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.serviceId == request.resource.data.serviceId;
+
+      allow delete: if signedIn()
+        && (resource.data.studentId == request.auth.uid
+          || isAdmin()
+          || isReceptionistFor(resource.data.departmentId));
+    }
+
+    match /notifications/{notificationId} {
+      allow read, delete: if signedIn()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update: if signedIn()
+        && (resource.data.userId == request.auth.uid || isAdmin())
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead'])
+        && request.resource.data.isRead is bool;
+      allow create: if signedIn()
+        && (isAdmin()
+          || (isStudent()
+            && request.resource.data.userId == request.auth.uid
+            && request.resource.data.entryId is string
+            && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.studentId == request.auth.uid)
+          || (request.resource.data.entryId is string
+            && isReceptionistFor(get(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.departmentId)));
+    }
+
+    match /queueHistory/{historyId} {
+      allow read: if signedIn()
+        && (resource.data.studentId == request.auth.uid
+          || isAdmin()
+          || isReceptionistFor(resource.data.departmentId));
+      allow create: if signedIn()
+        && ((isStudent()
+              && request.resource.data.studentId == request.auth.uid
+              && request.resource.data.outcome == 'cancelled'
+              && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.status == 'cancelled')
+          || isAdmin()
+          || (isReceptionistFor(request.resource.data.departmentId)
+            && getAfter(/databases/$(database)/documents/queueEntries/$(request.resource.data.entryId)).data.status == request.resource.data.outcome));
+      allow update, delete: if isAdmin();
+    }
+  }
+}

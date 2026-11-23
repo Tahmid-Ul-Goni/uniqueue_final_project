@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "766203059411",
+    "project_id": "uniqueue-8bd80",
+    "storage_bucket": "uniqueue-8bd80.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:766203059411:android:adfd5d1fb38bc1dd924826",
+        "android_client_info": {
+          "package_name": "com.cityuniversity.uniqueue"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "766203059411-o1r9ieoqltmt2ck5mpspnb7nou4pjfsn.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBe9YbpEmi8i0AtZ1rzxh2XRC2h1o9_Rfo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "766203059411-o1r9ieoqltmt2ck5mpspnb7nou4pjfsn.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "766203059411-l9rmeh3g9hjfko25bes2od9l5urk5vn1.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.cityuniversity.uniqueue"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
