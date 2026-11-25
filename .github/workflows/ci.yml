@@ -49,7 +49,7 @@ jobs:
           node-version: 22
 
       - name: Install Cloud Function dependencies
-        run: npm ci --prefix functions
+        run: npm install --prefix functions
 
       - name: Check Cloud Function JavaScript syntax
         run: npm --prefix functions run lint
