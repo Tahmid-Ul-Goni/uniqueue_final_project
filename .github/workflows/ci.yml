@@ -1,0 +1,58 @@
+name: UniQueue CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Flutter app and Firebase Function source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.50.1
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Check Dart formatting
+        run: dart format --output=none --set-exit-if-changed lib test
+
+      - name: Analyze Dart code
+        # Fails on analyzer errors and warnings. The SDK migration notices
+        # (flutter/material.dart -> material_ui) are reported, not fatal.
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Flutter tests
+        run: flutter test --reporter expanded
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install Cloud Function dependencies
+        run: npm ci --prefix functions
+
+      - name: Check Cloud Function JavaScript syntax
+        run: npm --prefix functions run lint
